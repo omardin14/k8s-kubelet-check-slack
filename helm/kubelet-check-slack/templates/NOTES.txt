@@ -1,0 +1,18 @@
+1. Get the application status by running these commands:
+   kubectl get jobs -n {{ include "kubelet-check-slack.namespace" . }}
+   kubectl get pods -n {{ include "kubelet-check-slack.namespace" . }}
+
+2. View the kubelet scanner logs:
+   kubectl logs job/{{ .Values.job.name }} -n {{ include "kubelet-check-slack.namespace" . }} -c kubelet-scanner
+
+3. View the Slack notifier logs:
+   kubectl logs job/{{ .Values.job.name }} -n {{ include "kubelet-check-slack.namespace" . }} -c slack-notifier
+
+4. To update the Slack token, create a secret with your token:
+   kubectl create secret generic {{ include "kubelet-check-slack.secretName" . }} \
+     --from-literal=bot-token="xoxb-your-slack-token-here" \
+     --namespace={{ include "kubelet-check-slack.namespace" . }}
+
+5. To clean up the deployment:
+   helm uninstall {{ .Release.Name }} -n {{ include "kubelet-check-slack.namespace" . }}
+

@@ -1,0 +1,12 @@
+{{- if .Values.configMap.create }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Values.configMap.name }}
+  namespace: {{ include "kubelet-check-slack.namespace" . }}
+  labels:
+    {{- include "kubelet-check-slack.labels" . | nindent 4 }}
+data:
+  slack-channel: {{ .Values.slack.channel | quote }}
+{{- end }}
+

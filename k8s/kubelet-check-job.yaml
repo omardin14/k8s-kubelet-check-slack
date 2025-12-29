@@ -1,0 +1,110 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kubelet-check-scan
+  namespace: kubelet-check
+spec:
+  template:
+    metadata:
+      labels:
+        app: kubelet-check
+        component: kubelet-scan
+    spec:
+      serviceAccountName: kubelet-check-sa
+      restartPolicy: Never
+      containers:
+      # Kubelet scanner container
+      - name: kubelet-scanner
+        image: kubelet-check-slack:latest
+        command: ["/bin/sh", "-c"]
+        args:
+          - |
+            python -c "
+            import json
+            import sys
+            sys.path.insert(0, '/app')
+            from kubelet_scanner import KubeletScanner
+            
+            scanner = KubeletScanner()
+            results = scanner.scan_kubelet_config()
+            
+            import os
+            output_dir = os.getenv('KUBELET_CHECK_OUTPUT_DIR', '/tmp/kubelet-check-results')
+            os.makedirs(output_dir, exist_ok=True)
+            
+            output_file = os.path.join(output_dir, 'kubelet-scan-results.json')
+            with open(output_file, 'w') as f:
+                json.dump(results, f, indent=2)
+            
+            print(f'Kubelet scan complete. Results written to {output_file}')
+            "
+        volumeMounts:
+        - name: kubelet-check-results
+          mountPath: /tmp/kubelet-check-results
+        env:
+        - name: PYTHONPATH
+          value: "/app"
+        - name: KUBELET_CHECK_OUTPUT_DIR
+          value: "/tmp/kubelet-check-results"
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: false  # Need write access for temp files
+          capabilities:
+            drop:
+            - ALL
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+      
+      # Slack notifier sidecar container
+      - name: slack-notifier
+        image: kubelet-check-slack:latest
+        command: ["python", "main.py"]
+        env:
+        - name: SIDECAR_MODE
+          value: "true"
+        - name: SLACK_BOT_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: slack-credentials
+              key: bot-token
+        - name: SLACK_CHANNEL
+          valueFrom:
+            configMapKeyRef:
+              name: kubelet-check-config
+              key: slack-channel
+        - name: KUBELET_CHECK_OUTPUT_DIR
+          value: "/tmp/kubelet-check-results"
+        - name: MAX_WAIT_TIME
+          value: "300"
+        - name: PYTHONPATH
+          value: "/app"
+        volumeMounts:
+        - name: kubelet-check-results
+          mountPath: /tmp/kubelet-check-results
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: false
+          capabilities:
+            drop:
+            - ALL
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "50m"
+          limits:
+            memory: "128Mi"
+            cpu: "100m"
+      
+      volumes:
+      - name: kubelet-check-results
+        emptyDir: {}
+

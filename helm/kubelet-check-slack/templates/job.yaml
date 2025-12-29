@@ -1,0 +1,125 @@
+{{- if not .Values.cronjob.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Values.job.name }}
+  namespace: {{ include "kubelet-check-slack.namespace" . }}
+  labels:
+    {{- include "kubelet-check-slack.labels" . | nindent 4 }}
+    app: kubelet-check
+    component: kubelet-scan
+  {{- with .Values.job.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if .Values.job.ttlSecondsAfterFinished }}
+  ttlSecondsAfterFinished: {{ .Values.job.ttlSecondsAfterFinished }}
+  {{- end }}
+  template:
+    metadata:
+      labels:
+        {{- include "kubelet-check-slack.selectorLabels" . | nindent 8 }}
+        app: kubelet-check
+        component: kubelet-scan
+    spec:
+      serviceAccountName: {{ include "kubelet-check-slack.serviceAccountName" . }}
+      restartPolicy: {{ .Values.job.restartPolicy }}
+      containers:
+      # Kubelet scanner container
+      - name: kubelet-scanner
+        image: "{{ .Values.global.imageRegistry }}{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+        imagePullPolicy: {{ .Values.image.pullPolicy | default "Never" }}
+        command: ["/bin/sh", "-c"]
+        args:
+          - |
+            python -c "
+            import json
+            import sys
+            import os
+            sys.path.insert(0, '/app')
+            from kubelet_scanner import KubeletScanner
+            
+            scanner = KubeletScanner()
+            results = scanner.scan_kubelet_config()
+            
+            output_dir = '{{ .Values.slack.outputDir }}'
+            os.makedirs(output_dir, exist_ok=True)
+            
+            output_file = os.path.join(output_dir, 'kubelet-scan-results.json')
+            with open(output_file, 'w') as f:
+                json.dump(results, f, indent=2)
+            
+            print(f'Kubelet scan complete. Results written to {output_file}')
+            "
+        volumeMounts:
+        - name: kubelet-check-results
+          mountPath: {{ .Values.slack.outputDir }}
+        env:
+        - name: PYTHONPATH
+          value: "/app"
+        - name: KUBELET_CHECK_OUTPUT_DIR
+          value: {{ .Values.slack.outputDir | quote }}
+        {{- if .Values.kubeletscanner.securityContext }}
+        securityContext:
+          {{- toYaml .Values.kubeletscanner.securityContext | nindent 10 }}
+        {{- end }}
+        {{- if .Values.kubeletscanner.resources }}
+        resources:
+          {{- toYaml .Values.kubeletscanner.resources | nindent 10 }}
+        {{- end }}
+      
+      # Slack notification sidecar container
+      - name: slack-notifier
+        image: "{{ .Values.global.imageRegistry }}{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+        imagePullPolicy: {{ .Values.image.pullPolicy | default "Never" }}
+        command: ["python", "main.py"]
+        env:
+        - name: SIDECAR_MODE
+          value: "true"
+        - name: SLACK_BOT_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "kubelet-check-slack.secretName" . }}
+              key: bot-token
+        - name: SLACK_CHANNEL
+          valueFrom:
+            configMapKeyRef:
+              name: {{ .Values.configMap.name }}
+              key: slack-channel
+        - name: KUBELET_CHECK_OUTPUT_DIR
+          value: {{ .Values.slack.outputDir | quote }}
+        - name: MAX_WAIT_TIME
+          value: {{ .Values.slack.maxWaitTime | quote }}
+        - name: PYTHONPATH
+          value: "/app"
+        {{- if and .Values.openai.enabled .Values.openai.apiKey }}
+        {{- if kindIs "string" .Values.openai.apiKey }}
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "kubelet-check-slack.secretName" . }}
+              key: openai-api-key
+        {{- end }}
+        {{- end }}
+        volumeMounts:
+        - name: kubelet-check-results
+          mountPath: {{ .Values.slack.outputDir }}
+        {{- if .Values.slack.resources }}
+        resources:
+          {{- toYaml .Values.slack.resources | nindent 10 }}
+        {{- end }}
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: false
+          capabilities:
+            drop:
+            - ALL
+      
+      volumes:
+      - name: kubelet-check-results
+        emptyDir: {}
+{{- end }}
+
