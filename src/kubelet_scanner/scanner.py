@@ -69,7 +69,8 @@ class KubeletScanner:
                 'total_nodes': 0,
                 'nodes_with_issues': 0,
                 'critical_issues': [],
-                'warnings': []
+                'warnings': [],
+                'passed_checks': []
             }
         }
         
@@ -103,6 +104,14 @@ class KubeletScanner:
                                 'node': node_info['name'],
                                 'issue': issue['description']
                             })
+                
+                # Aggregate passed checks
+                for check in node_info.get('passed_checks', []):
+                    results['summary']['passed_checks'].append({
+                        'node': node_info['name'],
+                        'check': check.get('check'),
+                        'description': check.get('description')
+                    })
             
             # Calculate overall status
             if results['summary']['critical_issues']:
@@ -137,6 +146,7 @@ class KubeletScanner:
             'internal_ip': None,
             'external_ip': None,
             'issues': [],
+            'passed_checks': [],
             'kubelet_config': {},
             'port_checks': {}
         }
@@ -156,8 +166,10 @@ class KubeletScanner:
         if node_info['ip']:
             node_info['port_checks'] = self._check_kubelet_ports(node_info['ip'])
         
-        # Compile issues
-        node_info['issues'] = self._compile_issues(node_info)
+        # Compile issues and passed checks
+        compiled = self._compile_issues(node_info)
+        node_info['issues'] = compiled.get('issues', [])
+        node_info['passed_checks'] = compiled.get('passed_checks', [])
         
         return node_info
     
@@ -287,20 +299,23 @@ class KubeletScanner:
         
         return result
     
-    def _compile_issues(self, node_info: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def _compile_issues(self, node_info: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Compile security issues from node scan results.
+        Compile security issues and passed checks from node scan results.
         
         Args:
             node_info: Node scan information
         
         Returns:
-            List of security issues
+            Dictionary with 'issues' and 'passed_checks' lists
         """
         issues = []
+        passed_checks = []
+        
+        default_port = node_info.get('port_checks', {}).get('default_port', {})
+        readonly_port = node_info.get('port_checks', {}).get('readonly_port', {})
         
         # Check for anonymous access on default port
-        default_port = node_info.get('port_checks', {}).get('default_port', {})
         if default_port.get('anonymous_access'):
             issues.append({
                 'severity': 'CRITICAL',
@@ -308,24 +323,28 @@ class KubeletScanner:
                 'description': f"Anonymous authentication enabled on kubelet port {default_port.get('port')}. Port is accessible without authentication.",
                 'recommendation': 'Disable anonymous authentication by setting --anonymous-auth=false in kubelet configuration'
             })
-        
-        # Check if default port is accessible (even if auth required, it's a warning)
-        if default_port.get('accessible') and not default_port.get('anonymous_access'):
-            issues.append({
-                'severity': 'WARNING',
-                'type': 'port_accessible',
-                'description': f"Kubelet port {default_port.get('port')} is accessible (authentication may be required)",
-                'recommendation': 'Ensure proper authentication and authorization are configured. Consider restricting network access to kubelet ports.'
+        elif default_port.get('accessible'):
+            # Port is accessible but requires authentication - this is GOOD
+            passed_checks.append({
+                'check': 'authentication_required',
+                'description': f"Kubelet port {default_port.get('port')} requires authentication (anonymous access disabled)",
+                'status': 'PASSED'
             })
         
         # Check if readonly port is accessible
-        readonly_port = node_info.get('port_checks', {}).get('readonly_port', {})
         if readonly_port.get('accessible'):
             issues.append({
                 'severity': 'CRITICAL',
                 'type': 'readonly_port_enabled',
                 'description': f"Readonly port {readonly_port.get('port')} is accessible. This port should be disabled (set --read-only-port=0)",
                 'recommendation': 'Disable readonly port by setting --read-only-port=0 in kubelet configuration'
+            })
+        else:
+            # Readonly port is closed - this is GOOD
+            passed_checks.append({
+                'check': 'readonly_port_disabled',
+                'description': f"Readonly port {readonly_port.get('port', 10255)} is disabled (closed)",
+                'status': 'PASSED'
             })
         
         # Check if authorization mode might be AlwaysAllow (inferred from anonymous access)
@@ -336,8 +355,18 @@ class KubeletScanner:
                 'description': 'Authorization mode may be set to AlwaysAllow (inferred from anonymous access)',
                 'recommendation': 'Set --authorization-mode to Webhook or RBAC, not AlwaysAllow'
             })
+        elif default_port.get('accessible') and not default_port.get('anonymous_access'):
+            # If port is accessible but requires auth, authorization is likely not AlwaysAllow
+            passed_checks.append({
+                'check': 'authorization_mode_secure',
+                'description': 'Authorization mode appears to be secure (not AlwaysAllow, authentication required)',
+                'status': 'PASSED'
+            })
         
-        return issues
+        return {
+            'issues': issues,
+            'passed_checks': passed_checks
+        }
     
     def save_results(self, file_path: str) -> None:
         """

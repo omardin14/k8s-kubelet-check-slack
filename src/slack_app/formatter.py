@@ -44,6 +44,11 @@ class SlackFormatter:
             status_text = "HEALTHY"
             status_color = "#36a64f"
         
+        total_nodes = summary.get('total_nodes', 0)
+        nodes_with_issues = summary.get('nodes_with_issues', 0)
+        healthy_nodes = total_nodes - nodes_with_issues
+        critical_count = len(analysis.get('critical_risks', [])) if analysis else 0
+        
         blocks = [
             {
                 "type": "header",
@@ -65,11 +70,19 @@ class SlackFormatter:
                 "fields": [
                     {
                         "type": "mrkdwn",
-                        "text": f"*Total Nodes:*\n`{summary['total_nodes']}`"
+                        "text": f"*Total Nodes:*\n`{total_nodes}`"
                     },
                     {
                         "type": "mrkdwn",
-                        "text": f"*Nodes with Issues:*\n🔴 `{summary['nodes_with_issues']}`"
+                        "text": f"*Nodes with Issues:*\n🔴 `{nodes_with_issues}`"
+                    },
+                    {
+                        "type": "mrkdwn",
+                        "text": f"*Healthy Nodes:*\n✅ `{healthy_nodes}`"
+                    },
+                    {
+                        "type": "mrkdwn",
+                        "text": f"*Critical Issues:*\n🔴 `{critical_count}`"
                     }
                 ]
             }
@@ -117,6 +130,37 @@ class SlackFormatter:
                     }
                 })
         
+        # Add passed checks section (security good practices)
+        if analysis and analysis.get('summary', {}).get('passed_checks'):
+            passed_checks = analysis['summary']['passed_checks']
+            if passed_checks:
+                blocks.append({"type": "divider"})
+                blocks.append({
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": "*✅ Security Checks Passed:*"
+                    }
+                })
+                # Group by check type
+                check_types = {}
+                for check in passed_checks[:10]:  # Show top 10
+                    check_type = check.get('check', 'unknown')
+                    if check_type not in check_types:
+                        check_types[check_type] = []
+                    check_types[check_type].append(check.get('description', ''))
+                
+                for check_type, descriptions in list(check_types.items())[:5]:  # Show top 5 types
+                    unique_descriptions = list(set(descriptions))[:3]  # Show up to 3 unique descriptions
+                    for desc in unique_descriptions:
+                        blocks.append({
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": f"✅ {desc}"
+                            }
+                        })
+        
         # Add node details
         nodes = summary.get('nodes', [])
         if nodes:
@@ -134,20 +178,52 @@ class SlackFormatter:
                 node_ip = node.get('ip', 'N/A')
                 issues = node.get('issues', [])
                 issues_count = len(issues)
+                passed_checks = node.get('passed_checks', [])
+                passed_count = len(passed_checks)
+                port_checks = node.get('port_checks', {})
                 
-                # Choose emoji based on issues
-                if any(issue.get('severity') == 'CRITICAL' for issue in issues):
+                # Determine risk level
+                has_critical = any(issue.get('severity') == 'CRITICAL' for issue in issues)
+                if has_critical:
                     emoji = "🔴"
+                    risk_level = "HIGH"
                 elif issues_count > 0:
                     emoji = "⚠️"
+                    risk_level = "MEDIUM"
                 else:
                     emoji = "✅"
+                    risk_level = "LOW"
+                
+                # Build port status text
+                port_status_parts = []
+                default_port = port_checks.get('default_port', {})
+                readonly_port = port_checks.get('readonly_port', {})
+                
+                if default_port.get('accessible'):
+                    if default_port.get('anonymous_access'):
+                        port_status_parts.append(f"Port {default_port.get('port', 10250)}: OPEN (ANONYMOUS)")
+                    else:
+                        port_status_parts.append(f"Port {default_port.get('port', 10250)}: OPEN (AUTH REQUIRED)")
+                else:
+                    port_status_parts.append(f"Port {default_port.get('port', 10250)}: CLOSED")
+                
+                if readonly_port.get('accessible'):
+                    port_status_parts.append(f"Readonly {readonly_port.get('port', 10255)}: OPEN")
+                else:
+                    port_status_parts.append(f"Readonly {readonly_port.get('port', 10255)}: CLOSED")
+                
+                port_status = " | ".join(port_status_parts) if port_status_parts else "Port checks unavailable"
+                
+                status_text = f"{emoji} *{node_name}* (IP: {node_ip})\n*Risk:* {risk_level} | *Issues:* {issues_count}"
+                if passed_count > 0:
+                    status_text += f" | *Passed Checks:* {passed_count}"
+                status_text += f" | {port_status}"
                 
                 blocks.append({
                     "type": "section",
                     "text": {
                         "type": "mrkdwn",
-                        "text": f"{emoji} *{node_name}* (IP: {node_ip})\n*Issues:* {issues_count}"
+                        "text": status_text
                     }
                 })
         

@@ -43,7 +43,7 @@ class KubeletAnalyzer:
             'critical_risks': scan_results.get('summary', {}).get('critical_issues', []),
             'warnings': scan_results.get('summary', {}).get('warnings', []),
             'recommendations': [],
-            'summary': scan_results.get('summary', {}),
+            'summary': scan_results.get('summary', {}),  # This includes passed_checks
             'node_analyses': []
         }
         

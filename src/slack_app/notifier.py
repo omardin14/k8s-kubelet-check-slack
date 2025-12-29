@@ -13,6 +13,7 @@ from pathlib import Path
 
 from .client import SlackClient
 from .formatter import SlackFormatter
+from utils.html_report import HTMLReportGenerator
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +60,31 @@ class SlackNotifier:
                 blocks=blocks
             )
             logger.info(f"Kubelet report sent successfully to {channel or self.client.default_channel}")
+            
+            # Generate and send HTML report
+            logger.info("📊 Generating HTML report...")
+            try:
+                timestamp = time.strftime('%Y%m%d-%H%M%S', time.gmtime())
+                html_path = Path(f"/tmp/kubelet-report-{timestamp}.html")
+                
+                HTMLReportGenerator.generate_kubelet_report(
+                    scan_data,
+                    analysis,
+                    str(html_path)
+                )
+                
+                # Send HTML report to Slack
+                self.client.send_file(
+                    str(html_path),
+                    channel=channel,
+                    title=f"Kubelet Security Check Report - {timestamp}",
+                    comment="📊 Detailed HTML report - Download and open in your browser!"
+                )
+                logger.info(f"✅ HTML report sent to Slack: {html_path}")
+                
+            except Exception as e:
+                logger.warning(f"⚠️  Failed to generate/send HTML report: {e}")
+            
             return response
             
         except Exception as e:
@@ -123,8 +149,25 @@ class SlackNotifier:
                     with open(results_file, 'r') as f:
                         scan_data = json.load(f)
                     
-                    # Send report
-                    return self.send_kubelet_report(scan_data, channel=channel)
+                    # Analyze results
+                    from kubelet_scanner import KubeletAnalyzer
+                    from utils import Config
+                    
+                    # Initialize analyzer with OpenAI if enabled
+                    config = Config()
+                    if config.is_openai_enabled():
+                        analyzer = KubeletAnalyzer(
+                            openai_api_key=config.get_openai_api_key(),
+                            openai_model=config.get_openai_model()
+                        )
+                        logger.info("🤖 AI-powered kubelet analysis enabled")
+                    else:
+                        analyzer = KubeletAnalyzer()
+                    
+                    analysis = analyzer.analyze_results(scan_data)
+                    
+                    # Send report (includes HTML report)
+                    return self.send_kubelet_report(scan_data, analysis, channel)
                     
                 except Exception as e:
                     logger.error(f"Error processing scan results: {e}")
