@@ -145,10 +145,12 @@ class KubeletScanner:
             'ip': None,
             'internal_ip': None,
             'external_ip': None,
+            'kubelet_version': None,
             'issues': [],
             'passed_checks': [],
             'kubelet_config': {},
-            'port_checks': {}
+            'port_checks': {},
+            'endpoint_checks': {}
         }
         
         # Extract node IPs
@@ -159,12 +161,20 @@ class KubeletScanner:
             elif address.type == 'ExternalIP':
                 node_info['external_ip'] = address.address
         
+        # Extract kubelet version from node status
+        node_info['kubelet_version'] = self._extract_kubelet_version(node)
+        
         # Check kubelet configuration from node status
         node_info['kubelet_config'] = self._check_kubelet_config(node)
         
         # Check kubelet ports
         if node_info['ip']:
             node_info['port_checks'] = self._check_kubelet_ports(node_info['ip'])
+            node_info['endpoint_checks'] = self._check_kubelet_endpoints(node_info['ip'])
+        
+        # Check version vulnerabilities
+        if node_info['kubelet_version']:
+            node_info['version_vulnerabilities'] = self._check_version_vulnerabilities(node_info['kubelet_version'])
         
         # Compile issues and passed checks
         compiled = self._compile_issues(node_info)
@@ -172,6 +182,24 @@ class KubeletScanner:
         node_info['passed_checks'] = compiled.get('passed_checks', [])
         
         return node_info
+    
+    def _extract_kubelet_version(self, node) -> Optional[str]:
+        """
+        Extract kubelet version from node status.
+        
+        Args:
+            node: Kubernetes node object
+        
+        Returns:
+            Kubelet version string or None
+        """
+        try:
+            # Kubelet version is in node.status.nodeInfo.kubeletVersion
+            if hasattr(node.status, 'node_info') and node.status.node_info:
+                return getattr(node.status.node_info, 'kubelet_version', None)
+        except Exception as e:
+            logger.debug(f"Could not extract kubelet version: {e}")
+        return None
     
     def _check_kubelet_config(self, node) -> Dict[str, Any]:
         """
@@ -244,6 +272,176 @@ class KubeletScanner:
         
         return port_checks
     
+    def _check_kubelet_endpoints(self, node_ip: str) -> Dict[str, Any]:
+        """
+        Check kubelet endpoints for security issues.
+        
+        Args:
+            node_ip: Node IP address
+        
+        Returns:
+            Dictionary with endpoint check results
+        """
+        endpoint_checks = {
+            'metrics': {
+                'endpoint': '/metrics',
+                'accessible': False,
+                'anonymous_access': False,
+                'status_code': None,
+                'error': None
+            }
+        }
+        
+        # Check metrics endpoint (should not be accessible without auth)
+        metrics_result = self._test_kubelet_endpoint(node_ip, self.DEFAULT_KUBELET_PORT, '/metrics')
+        endpoint_checks['metrics'].update(metrics_result)
+        
+        return endpoint_checks
+    
+    def _test_kubelet_endpoint(self, node_ip: str, port: int, endpoint: str) -> Dict[str, Any]:
+        """
+        Test if a kubelet endpoint is accessible.
+        
+        Args:
+            node_ip: Node IP address
+            port: Port number
+            endpoint: Endpoint path (e.g., '/metrics')
+        
+        Returns:
+            Dictionary with test results
+        """
+        result = {
+            'accessible': False,
+            'anonymous_access': False,
+            'status_code': None,
+            'error': None
+        }
+        
+        url = f"https://{node_ip}:{port}{endpoint}"
+        
+        try:
+            response = requests.get(
+                url,
+                verify=False,  # Kubelet uses self-signed certs
+                timeout=5,
+                allow_redirects=False
+            )
+            
+            result['accessible'] = True
+            result['status_code'] = response.status_code
+            
+            # If we get 200 OK without auth, anonymous access is enabled
+            if response.status_code == 200:
+                result['anonymous_access'] = True
+                logger.warning(f"⚠️  Anonymous access to {endpoint} enabled on {node_ip}:{port}")
+            
+        except requests.exceptions.SSLError:
+            # SSL error might mean the endpoint is open but requires proper cert
+            result['accessible'] = True
+            result['error'] = 'SSL verification failed (expected for kubelet)'
+            logger.debug(f"SSL error on {node_ip}:{port}{endpoint} (may be expected)")
+        except requests.exceptions.ConnectionError:
+            result['error'] = 'Connection refused or endpoint not accessible'
+            logger.debug(f"Endpoint {endpoint} not accessible on {node_ip}:{port}")
+        except requests.exceptions.Timeout:
+            result['error'] = 'Connection timeout'
+            logger.debug(f"Timeout connecting to {node_ip}:{port}{endpoint}")
+        except Exception as e:
+            result['error'] = str(e)
+            logger.debug(f"Error testing {node_ip}:{port}{endpoint}: {e}")
+        
+        return result
+    
+    def _check_version_vulnerabilities(self, version: str) -> Dict[str, Any]:
+        """
+        Check kubelet version for known vulnerabilities.
+        
+        Note: This is a simplified check. In production, you'd want to query
+        a CVE database or use a vulnerability scanning service.
+        
+        Args:
+            version: Kubelet version string (e.g., 'v1.28.0')
+        
+        Returns:
+            Dictionary with vulnerability information
+        """
+        vulnerabilities = {
+            'version': version,
+            'known_vulnerabilities': [],
+            'is_vulnerable': False,
+            'recommendation': None
+        }
+        
+        # Known critical CVEs (simplified - in production, use a CVE database)
+        # This is just an example - you'd want to maintain a proper CVE database
+        critical_cves = {
+            'CVE-2023-5528': {'affected_versions': ['<1.28.0'], 'severity': 'HIGH'},
+            'CVE-2023-5529': {'affected_versions': ['<1.27.4'], 'severity': 'HIGH'},
+            'CVE-2023-3978': {'affected_versions': ['<1.27.3'], 'severity': 'CRITICAL'},
+        }
+        
+        # Extract version number (e.g., 'v1.28.0' -> '1.28.0')
+        version_num = version.lstrip('v') if version else None
+        
+        if not version_num:
+            vulnerabilities['error'] = 'Could not parse version'
+            return vulnerabilities
+        
+        # Check against known CVEs (simplified version comparison)
+        # In production, use proper semantic versioning library
+        for cve_id, cve_info in critical_cves.items():
+            for affected in cve_info['affected_versions']:
+                if affected.startswith('<'):
+                    # Compare versions (simplified)
+                    affected_version = affected[1:].lstrip('v')
+                    if self._compare_versions(version_num, affected_version) < 0:
+                        vulnerabilities['known_vulnerabilities'].append({
+                            'cve': cve_id,
+                            'severity': cve_info['severity'],
+                            'affected_version': affected
+                        })
+                        vulnerabilities['is_vulnerable'] = True
+        
+        if vulnerabilities['is_vulnerable']:
+            vulnerabilities['recommendation'] = f"Upgrade kubelet to the latest patched version. Current version {version} has known vulnerabilities."
+        else:
+            vulnerabilities['recommendation'] = f"Version {version} appears to be secure, but always keep kubelet updated to the latest version."
+        
+        return vulnerabilities
+    
+    def _compare_versions(self, v1: str, v2: str) -> int:
+        """
+        Compare two version strings.
+        
+        Args:
+            v1: First version string
+            v2: Second version string
+        
+        Returns:
+            -1 if v1 < v2, 0 if v1 == v2, 1 if v1 > v2
+        """
+        try:
+            # Split version strings into parts
+            v1_parts = [int(x) for x in v1.split('.')]
+            v2_parts = [int(x) for x in v2.split('.')]
+            
+            # Pad with zeros if needed
+            max_len = max(len(v1_parts), len(v2_parts))
+            v1_parts.extend([0] * (max_len - len(v1_parts)))
+            v2_parts.extend([0] * (max_len - len(v2_parts)))
+            
+            # Compare
+            for i in range(max_len):
+                if v1_parts[i] < v2_parts[i]:
+                    return -1
+                elif v1_parts[i] > v2_parts[i]:
+                    return 1
+            
+            return 0
+        except Exception as e:
+            logger.debug(f"Error comparing versions {v1} and {v2}: {e}")
+            return 0
+    
     def _test_kubelet_port(self, node_ip: str, port: int) -> Dict[str, Any]:
         """
         Test if a kubelet port is accessible and if anonymous access is enabled.
@@ -314,6 +512,8 @@ class KubeletScanner:
         
         default_port = node_info.get('port_checks', {}).get('default_port', {})
         readonly_port = node_info.get('port_checks', {}).get('readonly_port', {})
+        endpoint_checks = node_info.get('endpoint_checks', {})
+        version_vulns = node_info.get('version_vulnerabilities', {})
         
         # Check for anonymous access on default port
         if default_port.get('anonymous_access'):
@@ -360,6 +560,47 @@ class KubeletScanner:
             passed_checks.append({
                 'check': 'authorization_mode_secure',
                 'description': 'Authorization mode appears to be secure (not AlwaysAllow, authentication required)',
+                'status': 'PASSED'
+            })
+        
+        # Check metrics endpoint
+        metrics_check = endpoint_checks.get('metrics', {})
+        if metrics_check.get('anonymous_access'):
+            issues.append({
+                'severity': 'CRITICAL',
+                'type': 'metrics_endpoint_accessible',
+                'description': f"Metrics endpoint is accessible without authentication. This exposes sensitive metrics data.",
+                'recommendation': 'Restrict access to /metrics endpoint or ensure authentication is required'
+            })
+        elif metrics_check.get('accessible') and not metrics_check.get('anonymous_access'):
+            # Metrics endpoint requires auth - this is GOOD
+            passed_checks.append({
+                'check': 'metrics_endpoint_secured',
+                'description': 'Metrics endpoint requires authentication (not accessible anonymously)',
+                'status': 'PASSED'
+            })
+        elif not metrics_check.get('accessible'):
+            # Metrics endpoint not accessible - also good
+            passed_checks.append({
+                'check': 'metrics_endpoint_secured',
+                'description': 'Metrics endpoint is not accessible (properly secured)',
+                'status': 'PASSED'
+            })
+        
+        # Check version vulnerabilities
+        if version_vulns.get('is_vulnerable'):
+            cve_list = ', '.join([v['cve'] for v in version_vulns.get('known_vulnerabilities', [])])
+            issues.append({
+                'severity': 'CRITICAL',
+                'type': 'version_vulnerable',
+                'description': f"Kubelet version {version_vulns.get('version')} has known vulnerabilities: {cve_list}",
+                'recommendation': version_vulns.get('recommendation', 'Upgrade to the latest patched version')
+            })
+        elif version_vulns.get('version'):
+            # Version is secure - this is GOOD
+            passed_checks.append({
+                'check': 'version_secure',
+                'description': f"Kubelet version {version_vulns.get('version')} appears to be secure (no known critical vulnerabilities)",
                 'status': 'PASSED'
             })
         

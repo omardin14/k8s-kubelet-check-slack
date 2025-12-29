@@ -99,6 +99,9 @@ make logs
 - Checks if readonly port is enabled (should be disabled/0)
 - Tests kubelet port accessibility (default port 10250)
 - Tests readonly port accessibility (port 10255)
+- **Checks metrics endpoint security** - Verifies `/metrics` endpoint is not accessible without authentication
+- **Version vulnerability scanning** - Checks kubelet version against known CVEs
+- **Passed security checks reporting** - Shows which security measures are properly configured
 - Identifies nodes with security misconfigurations
 - Risk level assessment (CRITICAL/WARNING/HEALTHY)
 
@@ -112,8 +115,11 @@ make logs
 ### 📊 Rich Reporting
 - **Slack Messages**: Formatted reports with status, statistics, and recommendations
 - **Color-Coded Status**: 🔴 Critical, ⚠️ Warning, ✅ Healthy
-- **Node Details**: Full breakdown of issues per node
+- **Security Checks Passed**: ✅ Highlights properly configured security measures
+- **Node Details**: Full breakdown of issues per node with passed checks
 - **Port Checks**: Detailed port accessibility information
+- **Version Information**: Kubelet version and vulnerability status
+- **HTML Reports**: Downloadable detailed HTML reports with interactive sections
 
 ### 🔒 Security
 - Non-privileged containers
@@ -130,7 +136,10 @@ The application consists of two containers running in a Kubernetes Job:
 
 1. **Kubelet Scanner Container**: 
    - Scans cluster nodes for kubelet configuration
-   - Tests kubelet port accessibility
+   - Tests kubelet port accessibility (default port 10250, readonly port 10255)
+   - Checks metrics endpoint security
+   - Extracts kubelet version and checks for known vulnerabilities
+   - Identifies security issues and passed security checks
    - Writes results to shared volume
 2. **Slack Notifier Container**: Monitors for scan results and sends formatted reports to Slack
 
@@ -234,9 +243,12 @@ make test
 
 A rich message with:
 - **Overall Status**: ✅ HEALTHY / ⚠️ WARNING / 🔴 CRITICAL
-- **Summary Statistics**: Total nodes, nodes with issues
+- **Summary Statistics**: Total nodes, nodes with issues, healthy nodes, critical issues count
+- **Security Checks Passed**: ✅ Shows which security measures are properly configured
 - **Critical Issues**: High-risk nodes highlighted
-- **Node Breakdown**: Status for each node
+- **Node Breakdown**: Status for each node with risk level, issues count, and passed checks
+- **Port Status**: Shows port accessibility and authentication requirements
+- **Version Information**: Kubelet version and vulnerability status
 - **Recommendations**: Actionable security improvements
 - **AI Analysis**: (if enabled) Detailed risk assessment
 

@@ -176,11 +176,13 @@ class SlackFormatter:
             for node in nodes[:10]:  # Show top 10
                 node_name = node.get('name', 'Unknown')
                 node_ip = node.get('ip', 'N/A')
+                kubelet_version = node.get('kubelet_version', 'Unknown')
                 issues = node.get('issues', [])
                 issues_count = len(issues)
                 passed_checks = node.get('passed_checks', [])
                 passed_count = len(passed_checks)
                 port_checks = node.get('port_checks', {})
+                version_vulns = node.get('version_vulnerabilities', {})
                 
                 # Determine risk level
                 has_critical = any(issue.get('severity') == 'CRITICAL' for issue in issues)
@@ -214,10 +216,17 @@ class SlackFormatter:
                 
                 port_status = " | ".join(port_status_parts) if port_status_parts else "Port checks unavailable"
                 
+                # Build version status
+                version_status = f"Version: {kubelet_version}"
+                if version_vulns.get('is_vulnerable'):
+                    version_status += " 🔴 (VULNERABLE)"
+                elif kubelet_version != 'Unknown':
+                    version_status += " ✅"
+                
                 status_text = f"{emoji} *{node_name}* (IP: {node_ip})\n*Risk:* {risk_level} | *Issues:* {issues_count}"
                 if passed_count > 0:
                     status_text += f" | *Passed Checks:* {passed_count}"
-                status_text += f" | {port_status}"
+                status_text += f" | {port_status}\n{version_status}"
                 
                 blocks.append({
                     "type": "section",
